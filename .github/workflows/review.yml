@@ -143,8 +143,9 @@ jobs:
         with:
           sparse-checkout: |
             .github/actions
-            packages.nix
+            drv-build-support.nix
             generate_markdown_report.py
+            packages.nix
 
       - name: setup nix
         uses: ./.github/actions/setup-nix
@@ -188,6 +189,25 @@ jobs:
 
           report_json=~/.cache/nixpkgs-review/pr-${PR_NUMBER}/report.json
           report_md=~/.cache/nixpkgs-review/pr-${PR_NUMBER}/report.md
+
+          if failed=$(jq -er '.result[].failed[]' "$report_json"); then
+            tmp=$(mktemp -d)
+            nix config show --json > "$tmp/nix-config.json"
+            nix derivation show --recursive -f. $failed > "$tmp/drv-graph.json"
+            nix-instantiate --eval --strict --json ../drv-build-support.nix \
+              --argstr configPath "$tmp/nix-config.json" \
+              --argstr drvGraphPath "$tmp/drv-graph.json" \
+              > "$tmp/drv-build-support.json"
+
+            for pkg in $failed; do
+              drvPath=$(nix eval -f. "${pkg}.drvPath" --raw)
+              supported=$(jq '.[$drvPath].supported' "$tmp/drv-build-support.json" --arg drvPath "$drvPath")
+              if [[ "$supported" = "false" ]]; then
+                jq '.result[].failed -= [$pkg] | .result[].unsupported += [$pkg]' --arg pkg "$pkg" "$report_json" | sponge "$report_json"
+              fi
+            done
+          fi
+
           if failed=$(jq -er '.result[].failed[]' "$report_json"); then
             git fetch origin "$BASE" && git switch -d "$BASE"
             build=()
